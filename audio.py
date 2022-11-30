@@ -44,7 +44,8 @@ def load_audio_from_video(filepath):
 
 def mel_filters() -> torch.Tensor:
     """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram. """
-    with np.load('mel_filters.npz') as f:
+    path = os.path.join(os.path.dirname(__file__), "assets", 'mel_filters.npz')
+    with np.load(path) as f:
         return torch.from_numpy(f['mel_80'])
 
 

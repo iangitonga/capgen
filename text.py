@@ -59,6 +59,7 @@ class Decoder(abc.ABC):
             penultimate_was_timestamp = len(seq) < 2 or seq[-2] >= self.tokenizer.timestamp_begin
 
             if last_was_timestamp:
+                # timestamps have appeared in pairs.
                 if penultimate_was_timestamp:  # has to be non-timestamp
                     logits[k, self.tokenizer.timestamp_begin :] = -np.inf
                 else:  # cannot be normal text tokens
@@ -78,6 +79,7 @@ class Decoder(abc.ABC):
                 logits[k, : self.tokenizer.timestamp_begin] = -np.inf
 
 
+# TODO: Replace decoder with correct version.
 class BeamSearchDecoder(Decoder):
     @torch.no_grad()
     def _decode(self, audio_features, n_beam):
@@ -159,28 +161,47 @@ class BeamSearchDecoder(Decoder):
             transcription_tokens.append(trans)
 
             delta = time.perf_counter() - t1
-            print(f'COMPLETED SEGMENT {i+1}/{n_chunks}, {delta} secs.')
+            print(f'COMPLETED SEGMENT {i+1}/{n_chunks}, {delta:.3f} secs.')
         return transcription_tokens
 
 
 class GreedyDecoder(Decoder):
     def _decode(self, audio_features):
+        # This function assumes that for each audio segment transcription tokens, there is a start timestamp,
+        # an end timestamp and  non-starting and non-ending timestamp tokens always appear in pairs. This
+        # functionality is implemented by token suppressors.
+        # If the decoding reaches max_sample_length without encountering <eot> token, the last timestamped
+        # tokens are dropped because they do not include the <eot> token.
         tokens_raw = [[self.tokenizer.sot]]
-        transcription_tokens = []
+        # Contains lists of tokens where in each list, the first and the last tokens are the timestamps and
+        # the rest of the tokens are text tokens.
+        segment_tokens = []
+        # Contains the current timestamped tokens.
+        current_ts_tokens = []
         for i in range(self.max_sample_len):
+            print(f'decoder counter: {i}/{self.max_sample_len}', end='\r')
             tokens = torch.tensor(tokens_raw)
             logits = self.model.decoder(tokens, audio_features)
-            # Pluck out the logits for the current token. (B, V)
+            # Pluck out the logits for the current token.
             logits = logits[:,-1]
             self.suppress_logits(logits, tokens)
             logits = F.softmax(logits, dim=-1)
-            next_token = logits.argmax()
+            next_token = logits.flatten().argmax()
             if next_token == self.tokenizer.eot:
                 print('<>', end=' ')
+                # In order to include the last timestamped transcription, it needs to have at least three tokens
+                # where the tokens could potentially be two timestamps and one text token. Other-wise we do not
+                # include it. 
+                if len(current_ts_tokens) > 3:
+                    segment_tokens.append(current_ts_tokens)
                 break
             tokens_raw[0].append(next_token)
-            transcription_tokens.append(next_token)
-        return transcription_tokens
+            
+            current_ts_tokens.append(next_token)
+            if next_token >= self.tokenizer.timestamp_begin and len(current_ts_tokens) > 2:
+                segment_tokens.append(current_ts_tokens)
+                current_ts_tokens = []
+        return segment_tokens
 
     @torch.no_grad()
     def decode(self, mel_spectogram):
@@ -207,33 +228,40 @@ class GreedyDecoder(Decoder):
             transcription_tokens.append(trans)
 
             delta = time.perf_counter() - t1
-            print(f'COMPLETED SEGMENT {i+1}/{n_spectogram}, {delta} secs.')
+            print(f'COMPLETED SEGMENT {i+1}/{n_spectogram}, {delta:.3f} secs.')
         return transcription_tokens
 
 
+
+def format_timestamp(tokenizer, ts_token, offset):
+    time_string = tokenizer.decode_with_timestamps([ts_token]).split('|')[1]
+    seconds = float(time_string) + offset
+    milliseconds = round(seconds * 1000.0)
+    hours = milliseconds // 3_600_000
+    milliseconds -= hours * 3_600_000
+    minutes = milliseconds // 60_000
+    milliseconds -= minutes * 60_000
+    seconds = milliseconds // 1_000
+    milliseconds -= seconds * 1_000
+
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
 def save_to_srt(batch_tokens, tokenizer, fname):
-    """Extracts subtitles text and timestamps from the given tokens and saves them in a single file."""
     print('Saving ...', end='')
-    segments = [tokenizer.decode_with_timestamps(segment) for segment in batch_tokens]
     with open(fname, 'w') as f:
-        for t in range(len(segments)):
-            current_ts = t * 30
-            text = segments[t].split('|>')
-            for i in range(1, len(text), 2):
-                # We only preserve the integer part
-                start_time = int(float(text[i-1].strip('<|'))) + current_ts
-                try:
-                    text_, end_time = text[i].split('<|')
-                except ValueError:
-                    continue
-                end_time = int(float(end_time)) + current_ts
-                # TODO: Better formatting of the time, hour, min, second.
-                if end_time < 10:
-                    timestamp = f'00:00:0{start_time},000 --> 00:00:0{end_time},000'
-                elif start_time < 10:
-                    timestamp = f'00:00:0{start_time},000 --> 00:00:{end_time},000'
-                else:
-                    timestamp = f'00:00:{start_time},000 --> 00:00:{end_time},000'
-                f.write(timestamp + '\n' + text_ + '\n\n')
+        ts_tokens_ctr = 1
+        for i in range(len(batch_tokens)):
+            segment_tokens = batch_tokens[i]
+            ts_offset = i*30.0
+            for ts_tokens in segment_tokens:
+                index = str(ts_tokens_ctr)
+                start_ts = format_timestamp(tokenizer, ts_tokens.pop(0), ts_offset)
+                end_ts = format_timestamp(tokenizer, ts_tokens.pop(-1), ts_offset)
+                timestamp = f'{start_ts} --> {end_ts}'
+                text = tokenizer.decode(ts_tokens).lstrip()
+                srt_segment = f'{index}\n{timestamp}\n{text}\n\n'
+                f.write(srt_segment)
+                ts_tokens_ctr += 1
     print('Done')
     return

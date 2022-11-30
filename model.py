@@ -1,22 +1,23 @@
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 # MODEL CONFIG PARAMETERS
-class ModelDims: 
-    n_mels = 80  # Number of audio mel-frequency bins expected.
-    n_vocab =  51864  # Size of whisper Vocabulary.
-    n_audio_ctx = 1500  # Number of frames(context length) in the encoder output representation.
-    n_audio_state = 384  # Dimensionality of each frame of the encoder output representation.
-    n_audio_mlp = n_audio_state * 4  # Dimensionality of the mlp first layer output.
-    n_audio_head = 6  # Number of heads in the audio encoder multi-head self-attention layers.
-    n_audio_layer = 4  # Number of blocks in the encoder.
-    n_text_ctx = 448  # Max number of tokens to be used as a context in the decoder.
-    n_text_state = 384  # Dimensionality of each token embedding.
-    n_text_mlp = n_text_state * 4
-    n_text_head = 6  # Number of heads in the text decoder multi-head attention layers.
-    n_text_layer = 4  # Number of blocks in the decoder.
+@dataclass
+class ModelDimensions: 
+    n_mels: int = None  # Number of audio mel-frequency bins expected.
+    n_vocab: int =  None  # Size of whisper Vocabulary.
+    n_audio_ctx: int = None  # Number of frames(context length) in the encoder output representation.
+    n_audio_state: int = None  # Dimensionality of each frame of the encoder output representation.
+    n_audio_head: int = None  # Number of heads in the audio encoder multi-head self-attention layers.
+    n_audio_layer: int = None  # Number of blocks in the encoder.
+    n_text_ctx: int = None  # Max number of tokens to be used as a context in the decoder.
+    n_text_state: int = None  # Dimensionality of each token embedding.
+    n_text_head: int = None # Number of heads in the text decoder multi-head attention layers.
+    n_text_layer: int = None  # Number of blocks in the decoder.
 
 
 class Conv1d(nn.Module):
@@ -159,7 +160,7 @@ class ResidualAttentionBlock(nn.Module):
     
     
 class AudioEncoder(nn.Module):
-    def __init__(self, n_mels, n_audio_layer, n_audio_ctx, n_audio_state, n_audio_head, n_audio_mlp):
+    def __init__(self, n_mels, n_audio_layer, n_audio_ctx, n_audio_state, n_audio_head):
         super().__init__()
         
         self.conv1 = Conv1d(n_mels, n_audio_state, kernel_size=3, stride=1, padding=1)
@@ -167,6 +168,7 @@ class AudioEncoder(nn.Module):
         self.gelu = GELU()
         self.register_buffer('positional_embedding', self._get_pos_encoding(n_audio_ctx, n_audio_state))
 
+        n_audio_mlp = n_audio_state * 4
         self.blocks = nn.ModuleList(
             [ResidualAttentionBlock(n_audio_state, n_audio_head, n_audio_mlp) for _ in range(n_audio_layer)]
         )
@@ -207,13 +209,13 @@ class AudioEncoder(nn.Module):
     
 
 class TextDecoder(nn.Module):
-    def __init__(self, n_vocab, n_text_layer, n_text_ctx, n_text_state, n_text_head, n_text_mlp):
+    def __init__(self, n_vocab, n_text_layer, n_text_ctx, n_text_state, n_text_head):
         super().__init__()
         
         self.token_embedding = Embedding(n_vocab, n_text_state)
         # Learned pos embedding.
         self.positional_embedding = nn.Parameter(torch.empty(n_text_ctx, n_text_state))
-
+        n_text_mlp = n_text_state * 4
         self.blocks = nn.ModuleList(
             [ResidualAttentionBlock(n_text_state, n_text_head, n_text_mlp, cross_attention=True)
             for _ in range(n_text_layer)]
@@ -246,7 +248,6 @@ class Whisper(nn.Module):
             n_audio_ctx=dims.n_audio_ctx, 
             n_audio_state=dims.n_audio_state,
             n_audio_head=dims.n_audio_head, 
-            n_audio_mlp=dims.n_audio_mlp,
         )
         self.decoder = TextDecoder(
             n_vocab=dims.n_vocab, 
@@ -254,7 +255,6 @@ class Whisper(nn.Module):
             n_text_ctx=dims.n_text_ctx,
             n_text_state=dims.n_text_state, 
             n_text_head=dims.n_text_head,
-            n_text_mlp=dims.n_text_mlp,
         )
     
     @torch.no_grad()
@@ -264,12 +264,3 @@ class Whisper(nn.Module):
     @torch.no_grad()
     def logits(self, tokens, audio_features):
         return self.decoder.forward(tokens, audio_features)
-
-
-def load_model(filepath):
-    dims = ModelDims()
-    model = Whisper(dims)
-    with open(filepath, 'rb') as fp:
-        checkpoint = torch.load(fp, map_location='cpu')
-    model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-    return model
