@@ -15,6 +15,6 @@ will be added in the future👀.
 3. Download ffmpeg cmd.
 3. Run `pip install -r requirements.txt` to install dependencies.
 
-#3 Usage
+## Usage
 Run `python capgen.py <path-to-video>`.
 An srt file is generated in the same directory.
