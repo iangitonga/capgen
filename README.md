@@ -16,5 +16,5 @@ and output formarts will be added in the future👀.
 3. Run `pip install -r requirements.txt` to install dependencies.
 
 ## Usage
-Run `python capgen.py <path-to-video>`.
-An srt file is generated in the same directory.
+- Run `python capgen.py <path-to-video>`. An srt file is generated in the same directory.
+- Run `python capgen.py -h` to see all the available options.
