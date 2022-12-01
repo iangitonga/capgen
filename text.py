@@ -7,6 +7,10 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
+from audio import pad_or_trim_spectrogram, N_FRAMES, N_FRAMES_PER_SECOND
+
+# CONSTANTS
+AVAILABLE_DECODERS = ('greedy', 'beamsearch',)
 
 
 class Decoder(abc.ABC):
@@ -16,7 +20,25 @@ class Decoder(abc.ABC):
         self.suppress_tokens = self._get_suppress_tokens()
         self.max_sample_len = max_sample_len
 
+    def segment_tokens(self, tokens):
+        """Given a list of tokens, it returns a list constaining lists where each inner list begins with
+        a timestamp token, then text tokens and ends with timestamp token. It drops the last piece if it
+        lacks end timestamp."""
+        segment_tokens = []
+        current_tokens = []
+        for token in tokens:
+            if token >= self.tokenizer.timestamp_begin and len(current_tokens) != 0:
+                current_tokens.append(token)
+                segment_tokens.append(current_tokens)
+                current_tokens = []
+            else:
+                current_tokens.append(token)
+        return segment_tokens
+
     def suppress_logits(self, logits, tokens):
+        # TODO: improve suppression of repeating grams.
+        self._suppress_repeating_one_grams(logits, tokens)
+        self._suppress_repeating_two_grams(logits, tokens)
         self._suppress_tokens(logits, tokens)
         self._suppress_blank(logits, tokens)
         self._apply_timestamp_rules(logits, tokens)
@@ -27,6 +49,42 @@ class Decoder(abc.ABC):
             
     def _suppress_tokens(self, logits, tokens):
         logits[:, self.suppress_tokens] = -np.inf
+
+    def _suppress_repeating_one_grams(self, logits, tokens):
+        # A hack to suppress repetition of one token for more than five times.
+        # Should be replaced with a better technique.
+        n_beam, n_ctx = tokens.shape
+        if n_ctx < 6:
+            return
+        for i in range(n_beam):
+            gram = tokens[i][-1]  # We want to suppress gram1
+            repeated = True
+            for j in range(1, 6):
+                tkn = tokens[i][j]
+                if tkn != gram:
+                    repeated = False
+                    break
+            if repeated:
+                logits[:, gram] = -np.inf
+
+    def _suppress_repeating_two_grams(self, logits, tokens):
+        # A hack to suppress repetition of two tokens for more than five times.
+        # Should be replaced with a better technique.
+        n_beam, n_ctx = tokens.shape
+        if n_ctx < 6:
+            return
+        for i in range(n_beam):
+            gram1, gram2 = tokens[i][-2:]
+            repeated = True
+            for j in range(3, 12, 2):
+                tkn1 = tokens[i][-j-1]
+                tkn2 = tokens[i][-j]
+                if tkn1 != gram1 or tkn2 != gram2:
+                    repeated = False
+                    break
+            if repeated:
+                logits[:, gram1] = -np.inf
+                logits[:, gram2] = -np.inf
         
     def _get_suppress_tokens(self):
         suppress_tokens = []
@@ -79,18 +137,19 @@ class Decoder(abc.ABC):
                 logits[k, : self.tokenizer.timestamp_begin] = -np.inf
 
 
-# TODO: Replace decoder with correct version.
 class BeamSearchDecoder(Decoder):
     @torch.no_grad()
     def _decode(self, audio_features, n_beam):
         # Copy the audio features to use for each beam. (n_beam, T, D)
         audio_features = audio_features.repeat_interleave(n_beam, dim=0)
         # Create initial tokens. (n_beam, ctx)
-        tokens = torch.tensor([[self.tokenizer.sot]]*n_beam)
-        sum_logprobs = [0]*n_beam
+        tokens = torch.tensor([[self.tokenizer.sot]]).repeat_interleave(n_beam, dim=0)
+        sum_logprobs = [0] * n_beam
         completed_sequences = []
+        completed_logprobs = []
         n_completed = 0
         for i in range(self.max_sample_len):
+            print(f'Decoder counter: {i}/{self.max_sample_len}', end='\r')
             if n_completed == n_beam:
                 print('<>', end=' ')
                 break
@@ -99,7 +158,7 @@ class BeamSearchDecoder(Decoder):
             logits = logits[:,-1]
             self.suppress_logits(logits, tokens)
             logprobs = F.log_softmax(logits, dim=-1)
-            top_logprobs, top_tokens = logprobs.topk(n_beam, dim=-1, largest=True, sorted=True)  # (n_beam, n_beam)
+            top_logprobs, top_tokens = logprobs.topk(n_beam, dim=-1, largest=True, sorted=True)  # (n_beam-n_completed, n_beam)
             # Organise the the log probabilities, contexts and scores for sorting and selection.
             scores = {}
             for row_idx in range(n_beam - n_completed):
@@ -118,7 +177,8 @@ class BeamSearchDecoder(Decoder):
                 logprob = scores[prefix]
                 pred_token = prefix[-1]
                 if pred_token == self.tokenizer.eot:
-                    completed_sequences.append(prefix)
+                    completed_sequences.append(list(prefix))
+                    completed_logprobs.append(logprob)
                     n_completed = n_completed + 1
                 else:
                     new_tokens.append(list(prefix))
@@ -128,107 +188,54 @@ class BeamSearchDecoder(Decoder):
             audio_features = audio_features[:n_beam - n_completed]
         if completed_sequences:
             # Return highest probability sequence of the final `n_beam` sequences.
-            final_tokens = list(completed_sequences[0])
-            final_tokens.pop(0) # Remove <sot> and <eot> tokens.
-            final_tokens.pop(-1)
-            return final_tokens
-        highest_idx = sum_logprobs.index(max(sum_logprobs))
-        highest = tokens[highest_idx].tolist()
-        return highest
+            top_idx = completed_logprobs.index(max(completed_logprobs))
+            final_tokens = list(completed_sequences[top_idx])
+        else:
+            top_idx = sum_logprobs.index(max(sum_logprobs))
+            final_tokens = tokens[top_idx].tolist()
+        # print(tokens.tolist())
+        # print(self.tokenizer.decode_with_timestamps(final_tokens))
+        final_tokens.pop(0) # Remove <sot> and <eot> tokens.
+        final_tokens.pop(-1)
+        final_tokens = self.segment_tokens(final_tokens)
+        return final_tokens
     
     @torch.no_grad()
-    def decode(self, mel_spectogram, n_beam):
-        """Extracts transcription tokens of given mel spectogram using beam search.
+    def decode(self, spectrogram, n_beam):
+        """Extracts transcription tokens of given mel spectrogram using beam search.
         
         Beam search works by keeping the most probable `n_beam` number of transcriptions at each timestep. The
         probability of a transcription is determined by the product of the probabilities of each individual token
         or equivalently the sum of log probabilities of each token(avoids risk of underflow).
 
         Args:
-            mel_spectogram: The spectogram of an entire audio with shape (n_chunks, N_MELS, CHUNK_LENGTH).
+            spectrogram: The spectrogram of an entire audio with shape (n_chunks, N_MELS, CHUNK_LENGTH).
         Returns:
-            A list of lists of length n_spectogram where each inner list contains the token transcriptions of
+            A list of lists of length n_spectrogram where each inner list contains the token transcriptions of
              the corresponding chunk.
         """
-        n_chunks = mel_spectogram.shape[0]
-        audio_features = self.model.embed_audio(mel_spectogram)
+        print('Decoding ...')
+        n_mels, T = spectrogram.shape
+        # An addition by 1 accounts for overlapping of segments and where `T % N_FRAMES` is not zero.
+        n_spectrogram =( T // N_FRAMES) + 1
+        # Offset position tells us the starting frame position of the next segment. The starting position of the
+        # next segment starts where the previous segment generated the final timestamp. This allows overlapping
+        # of segments which ensures that every section of audio is properly transcribed.
+        offset_pos = 0
         transcription_tokens = []
-        for i in range(n_chunks):
+        for i in range(n_spectrogram):
             t1 = time.perf_counter()
 
-            feature = audio_features[i].unsqueeze(0)
-            trans = self._decode(feature, n_beam)
-            transcription_tokens.append(trans)
+            seg_spectrogram = pad_or_trim_spectrogram(spectrogram[:,offset_pos:]).unsqueeze(0)
+            seg_spectrogram_features = self.model.embed_audio(seg_spectrogram)
+            seg_spectrogram_tokens = self._decode(seg_spectrogram_features, n_beam)
+            transcription_tokens.append(seg_spectrogram_tokens)
+            last_ts = self.tokenizer.decode_with_timestamps([seg_spectrogram_tokens[-1][-1]]).split('|')[1]
+            prev_segment_ts_delta = 30.0 - float(last_ts)
+            offset_pos += int(N_FRAMES - N_FRAMES_PER_SECOND * prev_segment_ts_delta)
 
-            delta = time.perf_counter() - t1
-            print(f'COMPLETED SEGMENT {i+1}/{n_chunks}, {delta:.3f} secs.')
-        return transcription_tokens
-
-
-class GreedyDecoder(Decoder):
-    def _decode(self, audio_features):
-        # This function assumes that for each audio segment transcription tokens, there is a start timestamp,
-        # an end timestamp and  non-starting and non-ending timestamp tokens always appear in pairs. This
-        # functionality is implemented by token suppressors.
-        # If the decoding reaches max_sample_length without encountering <eot> token, the last timestamped
-        # tokens are dropped because they do not include the <eot> token.
-        tokens_raw = [[self.tokenizer.sot]]
-        # Contains lists of tokens where in each list, the first and the last tokens are the timestamps and
-        # the rest of the tokens are text tokens.
-        segment_tokens = []
-        # Contains the current timestamped tokens.
-        current_ts_tokens = []
-        for i in range(self.max_sample_len):
-            print(f'decoder counter: {i}/{self.max_sample_len}', end='\r')
-            tokens = torch.tensor(tokens_raw)
-            logits = self.model.decoder(tokens, audio_features)
-            # Pluck out the logits for the current token.
-            logits = logits[:,-1]
-            self.suppress_logits(logits, tokens)
-            logits = F.softmax(logits, dim=-1)
-            next_token = logits.flatten().argmax()
-            if next_token == self.tokenizer.eot:
-                print('<>', end=' ')
-                # In order to include the last timestamped transcription, it needs to have at least three tokens
-                # where the tokens could potentially be two timestamps and one text token. Other-wise we do not
-                # include it. 
-                if len(current_ts_tokens) > 3:
-                    segment_tokens.append(current_ts_tokens)
-                break
-            tokens_raw[0].append(next_token)
-            
-            current_ts_tokens.append(next_token)
-            if next_token >= self.tokenizer.timestamp_begin and len(current_ts_tokens) > 2:
-                segment_tokens.append(current_ts_tokens)
-                current_ts_tokens = []
-        return segment_tokens
-
-    @torch.no_grad()
-    def decode(self, mel_spectogram):
-        """Extracts transcription tokens of given mel spectogram using a greedy strategy.
-        
-        A greedy decoder picks the most likely token predicted by the model at each timestep. It
-        is however important to note that the final transcription predicted using this strategy is
-        not necessarily the most probable. In most cases beam search offers better results.
-
-        Args:
-            mel_spectogram: The spectogram of an entire audio with shape (n_spectogram, N_MELS, CHUNK_LENGTH).
-        Returns:
-            A list of lists of length n_spectogram where each inner list contains the token transcriptions of
-             the corresponding chunk.
-        """
-        n_spectogram = mel_spectogram.shape[0]
-        audio_features = self.model.embed_audio(mel_spectogram)
-        transcription_tokens = []
-        for i in range(n_spectogram):
-            t1 = time.perf_counter()
-
-            feature = audio_features[i].unsqueeze(0)
-            trans = self._decode(feature)
-            transcription_tokens.append(trans)
-
-            delta = time.perf_counter() - t1
-            print(f'COMPLETED SEGMENT {i+1}/{n_spectogram}, {delta:.3f} secs.')
+            time_delta = time.perf_counter() - t1
+            print(f'COMPLETED SEGMENT {i+1}/{n_spectrogram}, {time_delta:.3f} secs.')
         return transcription_tokens
 
 
@@ -251,17 +258,20 @@ def save_to_srt(batch_tokens, tokenizer, fname):
     print('Saving ...', end='')
     with open(fname, 'w') as f:
         ts_tokens_ctr = 1
+        segment_offset = 0
         for i in range(len(batch_tokens)):
             segment_tokens = batch_tokens[i]
-            ts_offset = i*30.0
             for ts_tokens in segment_tokens:
                 index = str(ts_tokens_ctr)
-                start_ts = format_timestamp(tokenizer, ts_tokens.pop(0), ts_offset)
-                end_ts = format_timestamp(tokenizer, ts_tokens.pop(-1), ts_offset)
+                start_ts = format_timestamp(tokenizer, ts_tokens.pop(0), segment_offset)
+                end_ts_token = ts_tokens.pop(-1)
+                end_ts = format_timestamp(tokenizer, end_ts_token, segment_offset)
                 timestamp = f'{start_ts} --> {end_ts}'
                 text = tokenizer.decode(ts_tokens).lstrip()
                 srt_segment = f'{index}\n{timestamp}\n{text}\n\n'
                 f.write(srt_segment)
                 ts_tokens_ctr += 1
+            segment_delta = (30.0 - float(tokenizer.decode_with_timestamps([end_ts_token]).split('|')[1]))
+            segment_offset += 30 - segment_delta
     print('Done')
     return

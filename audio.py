@@ -27,6 +27,8 @@ CHUNK_LENGTH = 30 # in secs
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000: number of samples in a chunk
 # Number of frames in a mel spectrogram output expected by the model(3000).
 N_FRAMES = N_SAMPLES // HOP_LENGTH
+# Number of frames in the encoder input representing one second of audio.
+N_FRAMES_PER_SECOND = N_FRAMES / CHUNK_LENGTH
 
 
 def load_audio_from_video(filepath):
@@ -43,7 +45,10 @@ def load_audio_from_video(filepath):
 
 
 def mel_filters() -> torch.Tensor:
-    """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram. """
+    """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
+
+    The filterbank was computed by Librosa library.
+    """
     path = os.path.join(os.path.dirname(__file__), "assets", 'mel_filters.npz')
     with np.load(path) as f:
         return torch.from_numpy(f['mel_80'])
@@ -65,9 +70,7 @@ def get_audio_mel_spectrogram(audio: Tensor) -> Tensor:
     # Returns a filter matrix which can projects frequency bins to mel bins.
     filters = mel_filters()
     mel_spec = filters @ magnitudes
-    # Remove values less than 1e-10 and convert to log 10
     log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-    # Clip all the values less than {log_spec.max() - 8.0}
     log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
     log_spec = (log_spec + 4.0) / 4.0
     return log_spec
@@ -100,22 +103,3 @@ def pad_or_trim_spectrogram(spectrogram: Tensor, n_frames: int = N_FRAMES, *, ax
     else:
         raise TypeError(f'Expected a torch tensor, found: {type(spectrogram)}')
     return spectrogram
-
-
-def get_spectrogram_chunks(spectrogram):
-    """Splits the given spectrogram into chunks of spectrograms with the number
-     of frames expected by the encoder
-    
-    Args:
-        spectrogram: The entire spectrogram of input audio of shape (n_mels, F) where
-         F is the number of total frames in the audio.
-    Returns:
-        A batched tensor of spectrograms of shape (n_chunks, n_mels, T) where T is the number
-         of frames expected by the encoder.
-    """
-    n_mels, T = spectrogram.shape
-    n_chunks = T // N_FRAMES if T % N_FRAMES == 0 else T // N_FRAMES + 1
-    chunks = torch.empty((n_chunks, n_mels, N_FRAMES))
-    for i in range(n_chunks):
-        chunks[i] = pad_or_trim_spectrogram(spectrogram[:,i*N_FRAMES:])
-    return chunks
