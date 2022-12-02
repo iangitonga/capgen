@@ -54,7 +54,7 @@ def load_audio_from_video(filepath: str) -> Tensor:
     return torch.from_numpy(audio)
 
 
-def mel_filters() -> torch.Tensor:
+def mel_filters(device) -> torch.Tensor:
     """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
 
     The filterbank was computed by Librosa library.
@@ -65,7 +65,7 @@ def mel_filters() -> torch.Tensor:
     """
     path = os.path.join(os.path.dirname(__file__), "assets", 'mel_filters.npz')
     with np.load(path) as f:
-        return torch.from_numpy(f['mel_80'])
+        return torch.from_numpy(f['mel_80']).to(device)
 
 
 def get_audio_mel_spectrogram(audio: Tensor) -> Tensor:
@@ -76,13 +76,13 @@ def get_audio_mel_spectrogram(audio: Tensor) -> Tensor:
     Returns:
         a tensor of shape (N_MELS, N_FRAMES) representing the 2D spectogram.
     """
-    window = torch.hann_window(N_FFT)
+    window = torch.hann_window(N_FFT).to(audio.device)
     stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
     # The code below ditches the last column, takes the abs value(magnitudes) of freqs and squares them.
     # The last column belongs to the frequencies of the last window/frame.
     magnitudes = stft[:, :-1].abs() ** 2
     # Returns a filter matrix which can projects frequency bins to mel bins.
-    filters = mel_filters()
+    filters = mel_filters(audio.device)
     mel_spec = filters @ magnitudes
     log_spec = torch.clamp(mel_spec, min=1e-10).log10()
     log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)

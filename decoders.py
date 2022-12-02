@@ -63,7 +63,7 @@ class Decoder(abc.ABC):
             gram1, gram2 = tokens[i][-2:]
             # suppress repeating token.
             if torch.all(tokens[i][-5:] == gram2):
-                logits[:, gram] = -np.inf
+                logits[:, gram2] = -np.inf
              # suppress two repeating tokens.
             if torch.all(tokens[i][-9::2] == gram2):
                 logits[:, gram1] = -np.inf
@@ -249,7 +249,7 @@ def format_timestamp(tokenizer: Tokenizer, ts_token: Union[int, Tensor], offset:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
 
-def save_to_srt(batch_tokens: Sequence[Sequence[Sequence[Union[int, Tensor]]]], tokenizer: Tensor, fname: str) -> None:
+def save_to_srt(batch_tokens: List[List[List[Union[int, Tensor]]]], tokenizer: Tensor, fname: str) -> None:
     """Decodes the given audio transcription tokens and saves them in srt format.
     
     Args:

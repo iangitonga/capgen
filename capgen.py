@@ -14,8 +14,8 @@ from tokenizer import get_tokenizer
 def transcribe(filepath, model_name, decoder_type, n_beam):
     # TODO:  allow for model selection.
     print('Loading model and audio ...')
-    model = load_model(model_name)
-    audio = load_audio_from_video(filepath)
+    model, device = load_model(model_name)
+    audio = load_audio_from_video(filepath).to(device)
     mel_spectrogram = get_audio_mel_spectrogram(audio)
 
     # TODO:  allow for multilingual tokenizer.
