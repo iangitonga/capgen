@@ -1,3 +1,5 @@
+# Slightly modified version of code obtained from https://github.com/openai/whisper codebase.
+
 import os
 from dataclasses import dataclass
 from functools import lru_cache

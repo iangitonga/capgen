@@ -2,12 +2,16 @@
 
 import abc
 import time
+from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
 import numpy as np
+from torch import Tensor
+from typing import List, Tuple, Union
 
 from audio import pad_or_trim_spectrogram, N_FRAMES, N_FRAMES_PER_SECOND
+from tokenizer import Tokenizer
 
 # CONSTANTS
 AVAILABLE_DECODERS = ('greedy', 'beamsearch',)
@@ -20,10 +24,10 @@ class Decoder(abc.ABC):
         self.suppress_tokens = self._get_suppress_tokens()
         self.max_sample_len = max_sample_len
 
-    def segment_tokens(self, tokens):
+    def segment_tokens(self, tokens: List[Tensor]) -> List[List[Tensor]]:
         """Given a list of tokens, it returns a list constaining lists where each inner list begins with
-        a timestamp token, then text tokens and ends with timestamp token. It drops the last piece if it
-        lacks end timestamp."""
+        a timestamp token, then text tokens and ends with timestamp token.
+        """
         segment_tokens = []
         current_tokens = []
         for token in tokens:
@@ -35,39 +39,21 @@ class Decoder(abc.ABC):
                 current_tokens.append(token)
         return segment_tokens
 
-    def suppress_logits(self, logits, tokens):
+    def suppress_logits(self, logits: Tensor, tokens: Tensor) -> None:
         # TODO: improve suppression of repeating grams.
-        self._suppress_repeating_one_grams(logits, tokens)
-        self._suppress_repeating_two_grams(logits, tokens)
+        self._suppress_repeating_grams(logits, tokens)
         self._suppress_tokens(logits, tokens)
         self._suppress_blank(logits, tokens)
         self._apply_timestamp_rules(logits, tokens)
     
-    def _suppress_blank(self, logits, tokens):
+    def _suppress_blank(self, logits: Tensor, tokens: Tensor) -> None:
         if tokens.shape[1] == 1:
             logits[:, self.tokenizer.encode(" ") + [self.tokenizer.eot]] = -np.inf
             
-    def _suppress_tokens(self, logits, tokens):
+    def _suppress_tokens(self, logits: Tensor, tokens: Tensor) -> Tensor:
         logits[:, self.suppress_tokens] = -np.inf
 
-    def _suppress_repeating_one_grams(self, logits, tokens):
-        # A hack to suppress repetition of one token for more than five times.
-        # Should be replaced with a better technique.
-        n_beam, n_ctx = tokens.shape
-        if n_ctx < 6:
-            return
-        for i in range(n_beam):
-            gram = tokens[i][-1]  # We want to suppress gram1
-            repeated = True
-            for j in range(1, 6):
-                tkn = tokens[i][j]
-                if tkn != gram:
-                    repeated = False
-                    break
-            if repeated:
-                logits[:, gram] = -np.inf
-
-    def _suppress_repeating_two_grams(self, logits, tokens):
+    def _suppress_repeating_grams(self, logits: Tensor, tokens: Tensor) -> None:
         # A hack to suppress repetition of two tokens for more than five times.
         # Should be replaced with a better technique.
         n_beam, n_ctx = tokens.shape
@@ -75,18 +61,18 @@ class Decoder(abc.ABC):
             return
         for i in range(n_beam):
             gram1, gram2 = tokens[i][-2:]
-            repeated = True
-            for j in range(3, 12, 2):
-                tkn1 = tokens[i][-j-1]
-                tkn2 = tokens[i][-j]
-                if tkn1 != gram1 or tkn2 != gram2:
-                    repeated = False
-                    break
-            if repeated:
+            # suppress repeating token.
+            if torch.all(tokens[i][-5:] == gram2):
+                logits[:, gram] = -np.inf
+             # suppress two repeating tokens.
+            if torch.all(tokens[i][-9::2] == gram2):
                 logits[:, gram1] = -np.inf
+            if torch.all(tokens[i][-10::2] == gram1):
                 logits[:, gram2] = -np.inf
+                
+                
         
-    def _get_suppress_tokens(self):
+    def _get_suppress_tokens(self) -> Tuple[int]:
         suppress_tokens = []
         suppress_tokens.extend(self.tokenizer.non_speech_tokens)
 
@@ -97,7 +83,7 @@ class Decoder(abc.ABC):
 
         return tuple(sorted(set(suppress_tokens)))
     
-    def _apply_timestamp_rules(self, logits, tokens):
+    def _apply_timestamp_rules(self, logits: Tensor, tokens: Tensor):
         # precision = CHUNK_LENGTH / model.dims.n_audio_ctx  # usually 0.02 seconds
         precision = 30 / 448
         max_initial_timestamp = 1.0  # the initial timestamp cannot be later than this
@@ -139,7 +125,18 @@ class Decoder(abc.ABC):
 
 class BeamSearchDecoder(Decoder):
     @torch.no_grad()
-    def _decode(self, audio_features, n_beam):
+    def _decode(self, audio_features: Tensor, n_beam: int) -> List[List[Tensor]]:
+        """Extracts tokens for the given audio features using beamsearch of the given width.
+        
+        Args:
+            audio_features: A tensor of shape (1, n_audio_ctx, n_audio_state).
+            n_beam: Number of beams to search at every iteration.
+        
+        Returns:
+            A list of lists where each list contains a start timestamp token, text tokens and
+             end timestamp tokens. The inner lists are ordered so that the timestamped segments
+             appear in the order they appeared in the audio.
+        """
         # Copy the audio features to use for each beam. (n_beam, T, D)
         audio_features = audio_features.repeat_interleave(n_beam, dim=0)
         # Create initial tokens. (n_beam, ctx)
@@ -193,15 +190,13 @@ class BeamSearchDecoder(Decoder):
         else:
             top_idx = sum_logprobs.index(max(sum_logprobs))
             final_tokens = tokens[top_idx].tolist()
-        # print(tokens.tolist())
-        # print(self.tokenizer.decode_with_timestamps(final_tokens))
         final_tokens.pop(0) # Remove <sot> and <eot> tokens.
         final_tokens.pop(-1)
         final_tokens = self.segment_tokens(final_tokens)
         return final_tokens
     
     @torch.no_grad()
-    def decode(self, spectrogram, n_beam):
+    def decode(self, spectrogram: Tensor, n_beam: int) -> List[List[List[Tensor]]]:
         """Extracts transcription tokens of given mel spectrogram using beam search.
         
         Beam search works by keeping the most probable `n_beam` number of transcriptions at each timestep. The
@@ -209,13 +204,13 @@ class BeamSearchDecoder(Decoder):
         or equivalently the sum of log probabilities of each token(avoids risk of underflow).
 
         Args:
-            spectrogram: The spectrogram of an entire audio with shape (n_chunks, N_MELS, CHUNK_LENGTH).
+            spectrogram: The spectrogram of an entire audio with shape (n_segments, n_mels, 3000).
         Returns:
             A list of lists of length n_spectrogram where each inner list contains the token transcriptions of
-             the corresponding chunk.
+             the corresponding segment.
         """
         print('Decoding ...')
-        n_mels, T = spectrogram.shape
+        _, T = spectrogram.shape
         # An addition by 1 accounts for overlapping of segments and where `T % N_FRAMES` is not zero.
         n_spectrogram =( T // N_FRAMES) + 1
         # Offset position tells us the starting frame position of the next segment. The starting position of the
@@ -240,7 +235,7 @@ class BeamSearchDecoder(Decoder):
 
 
 
-def format_timestamp(tokenizer, ts_token, offset):
+def format_timestamp(tokenizer: Tokenizer, ts_token: Union[int, Tensor], offset: float) -> str:
     time_string = tokenizer.decode_with_timestamps([ts_token]).split('|')[1]
     seconds = float(time_string) + offset
     milliseconds = round(seconds * 1000.0)
@@ -254,7 +249,16 @@ def format_timestamp(tokenizer, ts_token, offset):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
 
-def save_to_srt(batch_tokens, tokenizer, fname):
+def save_to_srt(batch_tokens: Sequence[Sequence[Sequence[Union[int, Tensor]]]], tokenizer: Tensor, fname: str) -> None:
+    """Decodes the given audio transcription tokens and saves them in srt format.
+    
+    Args:
+        batch_tokens: A list of lists where each inner list at pos i contains transcription tokens of 30-second
+         audio segment at pos i in original audio. The inner lists also contains inner lists which contains
+         timestamped segments of text. [ [ [<0.00>, text..., <5.00>]... ]... ] when tokens are decoded.
+        tokenizer: A tokenizer to decode the tokens.
+        fname: The name of the file to save the tokens.
+    """
     print('Saving ...', end='')
     with open(fname, 'w') as f:
         ts_tokens_ctr = 1
@@ -271,7 +275,6 @@ def save_to_srt(batch_tokens, tokenizer, fname):
                 srt_segment = f'{index}\n{timestamp}\n{text}\n\n'
                 f.write(srt_segment)
                 ts_tokens_ctr += 1
-            segment_delta = (30.0 - float(tokenizer.decode_with_timestamps([end_ts_token]).split('|')[1]))
-            segment_offset += 30 - segment_delta
+            segment_offset += float(tokenizer.decode_with_timestamps([end_ts_token]).split('|')[1])
     print('Done')
     return

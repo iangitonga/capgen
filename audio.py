@@ -6,10 +6,8 @@ import ffmpeg
 import torch
 import torch.nn.functional as F
 import numpy as np
+from torch import Tensor
 
-
-# Typing stuff.
-Tensor = torch.Tensor
 
 # CONSTANTS
 SAMPLE_RATE = 16000
@@ -31,13 +29,25 @@ N_FRAMES = N_SAMPLES // HOP_LENGTH
 N_FRAMES_PER_SECOND = N_FRAMES / CHUNK_LENGTH
 
 
-def load_audio_from_video(filepath):
-    stream = ffmpeg.input(filepath)
-    audio_stream = stream['a']  # Pluck the audio stream.
-    # `s16le` format is PCM signed 16-bit little-endian which represents a raw audio format
-    # that can be processed the model. The `-` represents the output filename.
-    output_stream = ffmpeg.output(audio_stream, '-', format="s16le", acodec="pcm_s16le", ac=1, ar=SAMPLE_RATE)
-    audio_buffer, _ = ffmpeg.run(output_stream, cmd=['ffmpeg', '-nostdin'], capture_stdout=True, capture_stderr=True)
+def load_audio_from_video(filepath: str) -> Tensor:
+    """Extracts audio from a video in the given path.
+
+    Args:
+        filepath: Path to the video from which the audio shall be extracted.
+    
+    Returns:
+        The audio in a tensor of shape (n_audio_samples,) if the extraction is successful. Otherwise an
+        error message is shown and the program exits.
+    """
+    try:
+        stream = ffmpeg.input(filepath)
+        audio_stream = stream['a']  # Pluck the audio stream.
+        # `s16le` format is PCM signed 16-bit little-endian which represents a raw audio format
+        # that can be processed the model. The `-` represents the output filename.
+        output_stream = ffmpeg.output(audio_stream, '-', format="s16le", acodec="pcm_s16le", ac=1, ar=SAMPLE_RATE)
+        audio_buffer, _ = ffmpeg.run(output_stream, cmd=['ffmpeg', '-nostdin'], capture_stdout=True, capture_stderr=True)
+    except ffmpeg.Error as e:
+        raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
     audio = np.frombuffer(audio_buffer, np.int16)
     audio = audio / audio.max()  # Normalize.
     audio = audio.astype(np.float32)
@@ -48,6 +58,10 @@ def mel_filters() -> torch.Tensor:
     """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
 
     The filterbank was computed by Librosa library.
+
+    Returns:
+        A filterbank tensor of shape (80, 201). 80 is the number of dimensions to project
+        STFT output and 201 = (N_FFT // 2) + 1 is the number of frequencies computed by STFT. 
     """
     path = os.path.join(os.path.dirname(__file__), "assets", 'mel_filters.npz')
     with np.load(path) as f:
@@ -80,11 +94,13 @@ def pad_or_trim_spectrogram(spectrogram: Tensor, n_frames: int = N_FRAMES, *, ax
     """Pads or trims the given spectogram to n_frames, as expected by the encoder.
 
     Args:
-        spectrogram: a tensor of shape (*, N) where N is the number of frames the spectrogram contains.
+        spectrogram: A tensor of shape (*, N) where N is the number of frames the spectrogram contains.
         n_frames: The number of frames in the output. Default is 3000.
         axis: The axis where the frames lie. Default is -1, last axis.
+
     Raises:
         TypeError: If the input spectogram is not a Tensor.
+        
     Returns:
         A tensor of shape (*, n_frames) representing trimmed or padded spectrogram.
     """

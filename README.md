@@ -2,8 +2,7 @@
 Capgen is an automatic captions generator for videos. It employs Whisper neural network,
 offered by OpenAI to generate accurate timestamped captions for your videos in srt file format.
 Whisper is introduced here, https://openai.com/blog/whisper/. The code for Capgen is a from-scratch
-re-implementation of the code released by OpenAI. The current implementation utilizes `tiny.en` model
-which is the smallest english-only model OpenAI trained. Support for all the models, translation
+re-implementation of the code released by OpenAI. Support for all the non-english models, translation
 and output formarts will be added in the future👀.
 
 ## Dependencies

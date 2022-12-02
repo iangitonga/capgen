@@ -1,8 +1,10 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
 
 # MODEL CONFIG PARAMETERS
@@ -21,7 +23,7 @@ class ModelDimensions:
 
 
 class Conv1d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int, padding: int):
         super().__init__()
         
         self.stride = stride
@@ -30,7 +32,7 @@ class Conv1d(nn.Module):
         self.weight = nn.Parameter(torch.randn((out_channels, in_channels, kernel_size)))
         self.bias = nn.Parameter(torch.randn((out_channels))) # one bias for each channel.
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         out = F.conv1d(x, self.weight, bias=self.bias, stride=self.stride, padding=self.padding)
         return out
     
@@ -50,24 +52,32 @@ class GELU(nn.Module):
         super().__init__()
         self.distribution = torch.distributions.normal.Normal(0, 1)
         
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x = x * self.distribution.cdf(x)
         return x
     
 
 class Embedding(nn.Module):
-    def __init__(self, n_vocab, n_state):
+    def __init__(self, n_vocab: int, n_state: int):
         super().__init__()
+
         self.weight = nn.Parameter(torch.randn((n_vocab, n_state)))
-        
-    def forward(self, x):
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Embeds the input tokens.
+    
+        Args:
+            x: A tensor of integers to be embedded with shape (*,)
+        Returns:
+            A tensor of embeddings of shape (*, n_state) where `n_state` is the embedding size.
+        """
         x = self.weight[x]
         return x
 
 
 class LayerNorm(nn.Module):
     """Normalizes the activations of each vector in a given sequence independently."""
-    def __init__(self, n_state, eps=1e-05):
+    def __init__(self, n_state: int, eps: float = 1e-05):
         super().__init__()
         
         self.eps = eps
@@ -75,7 +85,7 @@ class LayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones((n_state,)))
         self.bias = nn.Parameter(torch.zeros((n_state,)))
         
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         mean = x.mean(dim=2, keepdim=True)
         n_state = x.shape[-1]
         variance = torch.sum((x - mean)**2, dim=2, keepdim=True) / n_state
@@ -85,13 +95,13 @@ class LayerNorm(nn.Module):
 
 
 class Linear(nn.Module):
-    def __init__(self, in_features, out_features, bias=True):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__()
         
         self.weight = nn.Parameter(torch.randn((out_features, in_features)))
         self.bias = nn.Parameter(torch.randn((out_features,))) if bias else None
         
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x = x @ self.weight.transpose(0, 1)
         if self.bias is not None:
             x = x + self.bias
@@ -99,7 +109,7 @@ class Linear(nn.Module):
     
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_head, n_state):
+    def __init__(self, n_head: int, n_state: int):
         super().__init__()
         
         self.n_head = n_head
@@ -110,7 +120,18 @@ class MultiHeadAttention(nn.Module):
         self.value = Linear(n_state, n_head * self.d_head)
         self.out = Linear(n_head * self.d_head, n_state)
         
-    def forward(self, x, xa=None, mask=None):
+    def forward(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None) -> Tensor:
+        """Computes self-attention between `x` and itself or cross-attention between `x` and `xa` if `xa` is provided.
+    
+        Args:
+            x: A tensor of shape (N, T, D) where N is the batch size, T is the length of the sequence and
+             D is the embedding size.
+            xa: A tensor of shape (N, T1, D).
+            mask: A tensor of shape (T, T). Should only be provided when computing self-attention.
+
+        Returns:
+            A tensor of shape (N, T, D).
+        """
         q = self.query(x)
         if xa is None:
             k = self.key(x)
@@ -122,24 +143,24 @@ class MultiHeadAttention(nn.Module):
         out = self.out(qkv)
         return out
     
-    def _qkv_attention(self, q, k, v, mask=None):
+    def _qkv_attention(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         n_batch, q_ctx = q.shape[0], q.shape[1]
         kv_ctx = k.shape[1]
         scale = self.d_head ** -0.25
-        q = q.view(n_batch, q_ctx, self.n_head, self.d_head).permute(0, 2, 1, 3) * scale # (1, n_head, T, d_head)
-        k = k.view(n_batch, kv_ctx, self.n_head, self.d_head).permute(0, 2, 3, 1) * scale # (1, n_head, d_head, T)
-        v = v.view(n_batch, kv_ctx, self.n_head, self.d_head).permute(0, 2, 1, 3) # (1, n_head, T, d_head)
-        qk = q @ k # (1, n_head, T1, T1)
+        q = q.view(n_batch, q_ctx, self.n_head, self.d_head).permute(0, 2, 1, 3) * scale # (N, n_head, T, d_head)
+        k = k.view(n_batch, kv_ctx, self.n_head, self.d_head).permute(0, 2, 3, 1) * scale # (N, n_head, d_head, T1)
+        v = v.view(n_batch, kv_ctx, self.n_head, self.d_head).permute(0, 2, 1, 3) # (N, n_head, T1, d_head)
+        qk = q @ k # (N, n_head, T, T1)
         if mask is not None:
-            qk += mask[:q_ctx, :kv_ctx] # Slice the rows and columns you need.
+            qk += mask[:q_ctx, :q_ctx] # Slice the rows and columns for masking.
         qk = F.softmax(qk, dim=-1)
-        qkv = qk @ v # -> (1, n_head, T, d_head)
+        qkv = qk @ v  # (N, n_head, T, d_head)
         qkv = qkv.permute(0, 2, 1, 3).flatten(start_dim=2)
         return qkv
 
     
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, n_state, n_head, n_mlp, cross_attention=False):
+    def __init__(self, n_state: int, n_head: int, n_mlp: int, cross_attention: bool = False):
         super().__init__()
         
         self.attn = MultiHeadAttention(n_head, n_state)
@@ -151,7 +172,18 @@ class ResidualAttentionBlock(nn.Module):
         self.mlp = nn.Sequential(Linear(n_state, n_mlp), GELU(), Linear(n_mlp, n_state))
         self.mlp_ln = LayerNorm(n_state)
 
-    def forward(self, x, xa=None, mask=None):
+    def forward(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None) -> Tensor:
+        """Computes attention with residual connections and a multi-layer perceptron at the end.
+
+        Args:
+            x: A tensor of shape (N, T, D) where N is the batch size, T is the context length and
+             D is the embedding size.
+            xa: A tensor of shape (N, T1, D).
+            mask: A tensor of shape (T, T).
+
+        Returns:
+            A tensor of shape (N, T, D).
+        """
         x = x + self.attn(self.attn_ln(x), mask=mask)
         if self.cross_attn:
             x = x + self.cross_attn(self.cross_attn_ln(x), xa)
@@ -160,7 +192,7 @@ class ResidualAttentionBlock(nn.Module):
     
     
 class AudioEncoder(nn.Module):
-    def __init__(self, n_mels, n_audio_layer, n_audio_ctx, n_audio_state, n_audio_head):
+    def __init__(self, n_mels: int, n_audio_layer: int, n_audio_ctx: int, n_audio_state: int, n_audio_head: int):
         super().__init__()
         
         self.conv1 = Conv1d(n_mels, n_audio_state, kernel_size=3, stride=1, padding=1)
@@ -174,10 +206,14 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_audio_state)
 
-    def forward(self, x):
-        """
-        x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
-            the mel spectrogram of the audio
+    def forward(self, x: Tensor) -> Tensor:
+        """Computes the features of the input audio.
+
+        Args:
+            x: Input audio tensor of shape (batch_size, n_mels, 3000) representing the mel spectrogram of the audio.
+
+        Returns:
+            A tensor of shape (batch_size, n_audio_ctx, n_audio_state).
         """
         x = self.gelu(self.conv1(x))
         x = self.gelu(self.conv2(x))
@@ -192,7 +228,7 @@ class AudioEncoder(nn.Module):
         x = self.ln_post(x)
         return x
     
-    def _get_pos_encoding(self, n_audio_ctx, n_audio_state):
+    def _get_pos_encoding(self, n_audio_ctx: int, n_audio_state: int) -> Tensor:
         # We first operate on the dim mask where we compute the encodings that depend only
         # on the dimension. It has shape (1, n_state//2)
         dim_mask = torch.arange(n_audio_state//2).view(1, -1)
@@ -209,7 +245,7 @@ class AudioEncoder(nn.Module):
     
 
 class TextDecoder(nn.Module):
-    def __init__(self, n_vocab, n_text_layer, n_text_ctx, n_text_state, n_text_head):
+    def __init__(self, n_vocab: int, n_text_layer: int, n_text_ctx: int, n_text_state: int, n_text_head: int):
         super().__init__()
         
         self.token_embedding = Embedding(n_vocab, n_text_state)
@@ -226,7 +262,16 @@ class TextDecoder(nn.Module):
         # persistent argument ensures the mask is not included in the state dict of the module.
         self.register_buffer('mask', mask, persistent=False)
 
-    def forward(self, x, xa):
+    def forward(self, x: Tensor, xa: Tensor) -> Tensor:
+        """Computes logits of the next token given text context and audio features.
+
+        Args:
+            x: Text context tokens tensor of shape (n_batch, n_ctx<=n_text_ctx).
+            xa: Audio features of shape (n_batch, n_audio_ctx, n_audio_state).
+
+        Returns:
+            Logits tensor of shape (n_batch, n_vocab).
+        """
         x = self.token_embedding(x) + self.positional_embedding[: x.shape[-1]]
         x = x.to(xa.dtype)
 
@@ -258,9 +303,26 @@ class Whisper(nn.Module):
         )
     
     @torch.no_grad()
-    def embed_audio(self, mel):
+    def embed_audio(self, mel: Tensor) -> Tensor:
+        """Computes audio features from the given mel-spectrogram.
+        
+        Args:
+            mel: Mel-spectrogram of the input audio of shape (n_batch, n_mels, 3000).
+
+        Returns:
+            Audio features tensor of shape (n_batch, n_audio_ctx, n_audio_state)
+        """
         return self.encoder.forward(mel)
     
     @torch.no_grad()
-    def logits(self, tokens, audio_features):
+    def logits(self, tokens: Tensor, audio_features: Tensor) -> Tensor:
+        """Computes logits for next token given context tokens and audio features.
+        
+        Args:
+            tokens: Text context tokens tensor of shape (n_batch, n_ctx<=n_text_ctx).
+            audio_features: Tensor of shape (n_batch, n_audio_ctx, n_audio_state).
+        
+        Returns:
+            Logits tensor of shape (n_batch, n_vocab).
+        """
         return self.decoder.forward(tokens, audio_features)
