@@ -119,6 +119,7 @@ class MultiHeadAttention(nn.Module):
         self.key = Linear(n_state, n_head * self.d_head, bias=False)
         self.value = Linear(n_state, n_head * self.d_head)
         self.out = Linear(n_head * self.d_head, n_state)
+        self.kv_cache = {}
         
     def forward(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None) -> Tensor:
         """Computes self-attention between `x` and itself or cross-attention between `x` and `xa` if `xa` is provided.
@@ -137,8 +138,17 @@ class MultiHeadAttention(nn.Module):
             k = self.key(x)
             v = self.value(x)
         else:
-            k = self.key(xa)
-            v = self.value(xa)
+            # We cache only during cross-attention. Caching help speed decoder performance.
+            # TODO: Design better caching mechanism.
+            if not self.kv_cache:
+                self.kv_cache['k'] = self.key(xa)
+                self.kv_cache['v'] = self.value(xa)
+            k = self.kv_cache['k']
+            v = self.kv_cache['v']
+            # Handles beamsearch decoder case where 'xa' batch dimension is trimmed when some beams are completed.
+            if k.shape[0] != x.shape[0]:
+                k = k[:x.shape[0]]
+                v = v[:x.shape[0]]  
         qkv = self._qkv_attention(q, k, v, mask)
         out = self.out(qkv)
         return out
@@ -158,7 +168,7 @@ class MultiHeadAttention(nn.Module):
         qkv = qkv.permute(0, 2, 1, 3).flatten(start_dim=2)
         return qkv
 
-    
+
 class ResidualAttentionBlock(nn.Module):
     def __init__(self, n_state: int, n_head: int, n_mlp: int, cross_attention: bool = False):
         super().__init__()
@@ -287,6 +297,8 @@ class TextDecoder(nn.Module):
 class Whisper(nn.Module):
     def __init__(self, dims):
         super().__init__()
+
+        self.dims = dims
         self.encoder = AudioEncoder(
             n_mels=dims.n_mels,
             n_audio_layer=dims.n_audio_layer,
@@ -326,3 +338,15 @@ class Whisper(nn.Module):
             Logits tensor of shape (n_batch, n_vocab).
         """
         return self.decoder.forward(tokens, audio_features)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @property
+    def is_multilingual(self):
+        return self.dims.n_vocab == 51865
+
+    def reset_kv_cache(self):
+        for block in self.decoder.blocks:
+             block.cross_attn.kv_cache.clear()

@@ -118,4 +118,5 @@ def pad_or_trim_spectrogram(spectrogram: Tensor, n_frames: int = N_FRAMES, *, ax
             spectrogram = F.pad(spectrogram, [pad for sizes in pad_widths[::-1] for pad in sizes])
     else:
         raise TypeError(f'Expected a torch tensor, found: {type(spectrogram)}')
+    spectrogram = spectrogram.unsqueeze(0)  # Add a batch dimension
     return spectrogram
