@@ -12,8 +12,9 @@ from decoders import detect_language, save_to_srt, GreedyDecoder, BeamSearchDeco
 from loader import load_model, AVAILABLE_MODELS
 from tokenizer import get_tokenizer, LANGUAGES
 
+# Maximum compression ratio a segment transcription text should have. Greater
+# compression ratio than this means the text is too repetitive.
 COMPRESSION_RATIO_THRESHOLD = 2.4
-
 
 
 def transcribe(filepath: str, model_name: str, task: str, language: str, decoder_type: str, n_beam: str, temperature: float):
@@ -57,7 +58,6 @@ def transcribe(filepath: str, model_name: str, task: str, language: str, decoder
             # as fallback.
             if result.compression_ratio > COMPRESSION_RATIO_THRESHOLD:
                 for temperature in (0.2, 0.4, 0.6, 0.8, 1.0):
-                    print(f' t{temperature},', end='')
                     result = SamplingDecoder(model, tokenizer, temperature).decode_segment(audio_segment)
                     if result.compression_ratio <= COMPRESSION_RATIO_THRESHOLD:
                         break
@@ -160,5 +160,3 @@ def cli():
 
 
 cli()
-
-# Optimization
