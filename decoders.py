@@ -20,6 +20,30 @@ AVAILABLE_DECODERS = ('greedy', 'beamsearch', 'sampling')
 MAX_SAMPLE_LEN = 448 // 2  # Maximum length of tokens in a 30s audio segment. Equal to n_ctx//2
 
 
+class ModelInference:
+    def __init__(self, model: Whisper):
+        self.model = model
+        self.cache = {}
+        self.hooks = []
+        
+    def install_hooks(self):
+        cache, hooks = self.model.install_kv_hooks(self.cache)
+        self.cache = cache
+        self.hooks = hooks
+        
+    def remove_hooks(self):
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
+        self.cache = {}
+    
+    def embed_audio(self, mel: Tensor) -> Tensor:
+        return self.model.embed_audio(mel)
+    
+    def logits(self, tokens: Tensor, audio_features: Tensor) -> Tensor:
+        return self.model.logits(tokens, audio_features, self.cache)
+
+
 @dataclass
 class AudioSegmentTranscript:
     tokens: List[int]
@@ -30,13 +54,12 @@ class AudioSegmentTranscript:
 
 class Decoder(abc.ABC):
     def __init__(self, model: Whisper, tokenizer: Tokenizer, max_sample_len: int=MAX_SAMPLE_LEN):
-        self.model = model
+        self.inference = ModelInference(model)
         self.tokenizer = tokenizer
         self.max_sample_len = max_sample_len
         self.suppress_tokens = self._get_suppress_tokens()
         self.sample_begin = len(self.tokenizer.sot_sequence)  # len of initial tokens.
 
-    @abc.abstractmethod
     def decode_segment(self, spectrogram: Tensor) -> AudioSegmentTranscript:
         """Extracts transcriptions of the given audio segment from the model.
 
@@ -47,6 +70,13 @@ class Decoder(abc.ABC):
         Returns:
             Transcription results.
         """
+        self.inference.install_hooks()
+        result = self._decode_segment(spectrogram)
+        self.inference.remove_hooks()
+        return result
+
+    @abc.abstractmethod
+    def _decode_segment(self, spectrogram: Tensor) -> AudioSegmentTranscript:
         pass
 
     def suppress_logits(self, logits: Tensor, tokens: Tensor) -> None:
@@ -154,13 +184,12 @@ class GreedyDecoder(Decoder):
      - It does not necessarily produce the transcription with the highest probability.
      - It can easily get stuck in a repetition loop.
     """
-    def decode_segment(self, spectrogram):
-        self.model.reset_kv_cache()
-        audio_features = self.model.embed_audio(spectrogram)
+    def _decode_segment(self, spectrogram):
+        audio_features = self.inference.embed_audio(spectrogram)
         ctx_tokens = torch.tensor([[*self.tokenizer.sot_sequence]])
         out_tokens = []
         for i in range(self.max_sample_len):
-            logits = self.model.logits(ctx_tokens, audio_features)
+            logits = self.inference.logits(ctx_tokens, audio_features)
             logits = logits[:,-1]
             self.suppress_logits(logits, ctx_tokens)
             probs = F.softmax(logits, dim=-1)
@@ -185,9 +214,8 @@ class BeamSearchDecoder(Decoder):
         super().__init__(model, tokenizer)
         self.n_beam = n_beam
 
-    def decode_segment(self, spectrogram):
-        self.model.reset_kv_cache()
-        audio_features = self.model.embed_audio(spectrogram)
+    def _decode_segment(self, spectrogram):
+        audio_features = self.inference.embed_audio(spectrogram)
         # Copy the audio features to use for each beam. (n_beam, T, D)
         audio_features = audio_features.repeat_interleave(self.n_beam, dim=0)
         # Create initial tokens for all the beams. (n_beam, ctx)
@@ -204,7 +232,7 @@ class BeamSearchDecoder(Decoder):
             if n_completed == self.n_beam:
                 break
             # Calculate the logits. TODO: Possible optimization because the audio features is always the same in each iteration.
-            logits = self.model.logits(ctx_tokens, audio_features)
+            logits = self.inference.logits(ctx_tokens, audio_features)
             logits = logits[:,-1]
             self.suppress_logits(logits, ctx_tokens)
             logprobs = F.log_softmax(logits, dim=-1)
@@ -233,13 +261,16 @@ class BeamSearchDecoder(Decoder):
                     final_beams_tokens.append(completed_beam_tokens)
                     final_beams_logprobs.append(logprob)
                     n_completed = n_completed + 1
+
+                    # Slices the audio features and kv cache to account for completed beams.
+                    audio_features = audio_features[:self.n_beam - n_completed]
+                    for module, cached in self.inference.cache.items():
+                        self.inference.cache[module] = cached[:self.n_beam - n_completed]
                 else:
                     new_ctx_tokens.append(list(prefix))
                     new_sum_logprobs.append(logprob)
             ctx_tokens = torch.tensor(new_ctx_tokens)
             sum_logprobs = new_sum_logprobs
-            # Slices the audio features to account for completed beams.
-            audio_features = audio_features[:self.n_beam - n_completed]
         if final_beams_tokens:
             # Return highest probability sequence of the final `n_beam` sequences.
             # TODO: Add length normalization or length penalty.
@@ -270,13 +301,12 @@ class SamplingDecoder(Decoder):
 
         self.temperature = temperature
 
-    def decode_segment(self, spectrogram):
-        self.model.reset_kv_cache()
-        audio_features = self.model.embed_audio(spectrogram)
+    def _decode_segment(self, spectrogram):
+        audio_features = self.inference.embed_audio(spectrogram)
         ctx_tokens = torch.tensor([[*self.tokenizer.sot_sequence]])
         out_tokens = []
         for i in range(self.max_sample_len):
-            logits = self.model.logits(ctx_tokens, audio_features)
+            logits = self.inference.logits(ctx_tokens, audio_features)
             logits = logits[:,-1]
             self.suppress_logits(logits, ctx_tokens)
             logits = logits / self.temperature
@@ -300,7 +330,6 @@ def detect_language(spectrogram: Tensor, model: Whisper) -> str:
     Returns:
         A string representing language id. for instance 'en' for English, or 'es' Spanish.
     """
-    model.reset_kv_cache()
     audio_segment = pad_or_trim_spectrogram(spectrogram)
     audio_features = model.embed_audio(audio_segment)
     tokenizer = get_tokenizer(multilingual=True)
@@ -315,10 +344,8 @@ def detect_language(spectrogram: Tensor, model: Whisper) -> str:
     return language_id
 
 
-def format_timestamp(tokenizer: Tokenizer, ts_token: int, offset: float) -> str:
-    time_string = tokenizer.decode_with_timestamps([ts_token]).split('|')[1]
-    seconds = float(time_string) + offset
-    milliseconds = round(seconds * 1000.0)
+def format_timestamp(timestamp: float) -> str:
+    milliseconds = round(timestamp * 1000.0)
     hours = milliseconds // 3_600_000
     milliseconds -= hours * 3_600_000
     minutes = milliseconds // 60_000
@@ -346,13 +373,16 @@ def save_to_srt(segment_transcripts: List[AudioSegmentTranscript], tokenizer: To
             segment_transcript = segment_transcripts[i]
             for ts_tokens in segment_transcript.segmented_tokens:
                 index = str(ts_tokens_ctr)
-                start_ts = format_timestamp(tokenizer, ts_tokens.pop(0), segment_offset)
-                end_ts_token = ts_tokens.pop(-1)
-                end_ts = format_timestamp(tokenizer, end_ts_token, segment_offset)
-                timestamp = f'{start_ts} --> {end_ts}'
+                start_ts = float(tokenizer.decode_with_timestamps([ts_tokens.pop(0)]).split('|')[1])
+                start_time = format_timestamp(start_ts + segment_offset)
+                end_ts = float(tokenizer.decode_with_timestamps([ts_tokens.pop(-1)]).split('|')[1])
+                # Don't allow a segment final timestamp to be greater than 30.0 secs.
+                end_ts = end_ts if end_ts <= 30.0 else 30.0
+                end_time = format_timestamp(end_ts + segment_offset)
+                timestamp = f'{start_time} --> {end_time}'
                 text = tokenizer.decode(ts_tokens).lstrip()
                 srt_segment = f'{index}\n{timestamp}\n{text}\n\n'
                 f.write(srt_segment)
                 ts_tokens_ctr += 1
-            segment_offset += float(tokenizer.decode_with_timestamps([end_ts_token]).split('|')[1])
+            segment_offset += end_ts
     print('\nSrt subtitles successfully saved.')

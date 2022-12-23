@@ -108,7 +108,7 @@ class Linear(nn.Module):
         return x
     
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadSelfAttention(nn.Module):
     def __init__(self, n_head: int, n_state: int):
         super().__init__()
         
@@ -119,41 +119,75 @@ class MultiHeadAttention(nn.Module):
         self.key = Linear(n_state, n_head * self.d_head, bias=False)
         self.value = Linear(n_state, n_head * self.d_head)
         self.out = Linear(n_head * self.d_head, n_state)
-        self.kv_cache = {}
         
-    def forward(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None) -> Tensor:
-        """Computes self-attention between `x` and itself or cross-attention between `x` and `xa` if `xa` is provided.
+    def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+        """Computes self-attention between `x` and itself.
     
         Args:
             x: A tensor of shape (N, T, D) where N is the batch size, T is the length of the sequence and
              D is the embedding size.
-            xa: A tensor of shape (N, T1, D).
             mask: A tensor of shape (T, T). Should only be provided when computing self-attention.
 
         Returns:
             A tensor of shape (N, T, D).
         """
         q = self.query(x)
-        if xa is None:
-            k = self.key(x)
-            v = self.value(x)
-        else:
-            # We cache only during cross-attention. Caching help speed decoder performance.
-            # TODO: Design better caching mechanism.
-            if not self.kv_cache:
-                self.kv_cache['k'] = self.key(xa)
-                self.kv_cache['v'] = self.value(xa)
-            k = self.kv_cache['k']
-            v = self.kv_cache['v']
-            # Handles beamsearch decoder case where 'xa' batch dimension is trimmed when some beams are completed.
-            if k.shape[0] != x.shape[0]:
-                k = k[:x.shape[0]]
-                v = v[:x.shape[0]]  
+        k = self.key(x)
+        v = self.value(x)
         qkv = self._qkv_attention(q, k, v, mask)
         out = self.out(qkv)
         return out
     
     def _qkv_attention(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+        n_batch, ctx = q.shape[0], q.shape[1]
+        scale = self.d_head ** -0.25
+        q = q.view(n_batch, ctx, self.n_head, self.d_head).permute(0, 2, 1, 3) * scale # (N, n_head, T, d_head)
+        k = k.view(n_batch, ctx, self.n_head, self.d_head).permute(0, 2, 3, 1) * scale # (N, n_head, d_head, T1)
+        v = v.view(n_batch, ctx, self.n_head, self.d_head).permute(0, 2, 1, 3) # (N, n_head, T1, d_head)
+        qk = q @ k # (N, n_head, T, T1)
+        if mask is not None:
+            qk += mask[:ctx, :ctx] # Slice the rows and columns for masking.
+        qk = F.softmax(qk, dim=-1)
+        qkv = qk @ v  # (N, n_head, T, d_head)
+        qkv = qkv.permute(0, 2, 1, 3).flatten(start_dim=2)
+        return qkv
+    
+
+class MultiHeadCrossAttention(nn.Module):
+    def __init__(self, n_head: int, n_state: int):
+        super().__init__()
+        
+        self.n_head = n_head
+        self.n_state = n_state
+        self.d_head = n_state // n_head
+        self.query = Linear(n_state, n_head * self.d_head)
+        self.key = Linear(n_state, n_head * self.d_head, bias=False)
+        self.value = Linear(n_state, n_head * self.d_head)
+        self.out = Linear(n_head * self.d_head, n_state)
+        
+    def forward(self, x: Tensor, xa: Tensor, cache: Optional[dict] = None) -> Tensor:
+        """Computes cross-attention between `x` and `xa`.
+    
+        Args:
+            x: A tensor of shape (N, T, D) where N is the batch size, T is the length of the sequence and
+             D is the embedding size.
+            xa: A tensor of shape (N, T1, D).
+
+        Returns:
+            A tensor of shape (N, T, D).
+        """
+        q = self.query(x)
+        if cache and self.key in cache:
+            k = cache[self.key]
+            v = cache[self.value]
+        else:
+            k = self.key(xa)
+            v = self.value(xa) 
+        qkv = self._qkv_attention(q, k, v)
+        out = self.out(qkv)
+        return out
+    
+    def _qkv_attention(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         n_batch, q_ctx = q.shape[0], q.shape[1]
         kv_ctx = k.shape[1]
         scale = self.d_head ** -0.25
@@ -161,8 +195,6 @@ class MultiHeadAttention(nn.Module):
         k = k.view(n_batch, kv_ctx, self.n_head, self.d_head).permute(0, 2, 3, 1) * scale # (N, n_head, d_head, T1)
         v = v.view(n_batch, kv_ctx, self.n_head, self.d_head).permute(0, 2, 1, 3) # (N, n_head, T1, d_head)
         qk = q @ k # (N, n_head, T, T1)
-        if mask is not None:
-            qk += mask[:q_ctx, :q_ctx] # Slice the rows and columns for masking.
         qk = F.softmax(qk, dim=-1)
         qkv = qk @ v  # (N, n_head, T, d_head)
         qkv = qkv.permute(0, 2, 1, 3).flatten(start_dim=2)
@@ -173,16 +205,16 @@ class ResidualAttentionBlock(nn.Module):
     def __init__(self, n_state: int, n_head: int, n_mlp: int, cross_attention: bool = False):
         super().__init__()
         
-        self.attn = MultiHeadAttention(n_head, n_state)
+        self.attn = MultiHeadSelfAttention(n_head, n_state)
         self.attn_ln = LayerNorm(n_state)
 
-        self.cross_attn = MultiHeadAttention(n_head, n_state) if cross_attention else None
+        self.cross_attn = MultiHeadCrossAttention(n_head, n_state) if cross_attention else None
         self.cross_attn_ln = LayerNorm(n_state) if cross_attention else None
 
         self.mlp = nn.Sequential(Linear(n_state, n_mlp), GELU(), Linear(n_mlp, n_state))
         self.mlp_ln = LayerNorm(n_state)
 
-    def forward(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None) -> Tensor:
+    def forward(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None, cache: Optional[dict] = None) -> Tensor:
         """Computes attention with residual connections and a multi-layer perceptron at the end.
 
         Args:
@@ -196,7 +228,7 @@ class ResidualAttentionBlock(nn.Module):
         """
         x = x + self.attn(self.attn_ln(x), mask=mask)
         if self.cross_attn:
-            x = x + self.cross_attn(self.cross_attn_ln(x), xa)
+            x = x + self.cross_attn(self.cross_attn_ln(x), xa, cache)
         x = x + self.mlp(self.mlp_ln(x))
         return x
     
@@ -272,7 +304,7 @@ class TextDecoder(nn.Module):
         # persistent argument ensures the mask is not included in the state dict of the module.
         self.register_buffer('mask', mask, persistent=False)
 
-    def forward(self, x: Tensor, xa: Tensor) -> Tensor:
+    def forward(self, x: Tensor, xa: Tensor, cache: Optional[dict] = None) -> Tensor:
         """Computes logits of the next token given text context and audio features.
 
         Args:
@@ -286,7 +318,7 @@ class TextDecoder(nn.Module):
         x = x.to(xa.dtype)
 
         for block in self.blocks:
-            x = block(x, xa, mask=self.mask)
+            x = block(x, xa, mask=self.mask, cache=cache)
 
         x = self.ln(x)
         logits = (x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)).float()
@@ -327,7 +359,7 @@ class Whisper(nn.Module):
         return self.encoder.forward(mel)
     
     @torch.no_grad()
-    def logits(self, tokens: Tensor, audio_features: Tensor) -> Tensor:
+    def logits(self, tokens: Tensor, audio_features: Tensor, cache: Optional[dict] = None) -> Tensor:
         """Computes logits for next token given context tokens and audio features.
         
         Args:
@@ -337,7 +369,7 @@ class Whisper(nn.Module):
         Returns:
             Logits tensor of shape (n_batch, n_vocab).
         """
-        return self.decoder.forward(tokens, audio_features)
+        return self.decoder.forward(tokens, audio_features, cache)
 
     @property
     def device(self):
@@ -347,6 +379,16 @@ class Whisper(nn.Module):
     def is_multilingual(self):
         return self.dims.n_vocab == 51865
 
-    def reset_kv_cache(self):
-        for block in self.decoder.blocks:
-             block.cross_attn.kv_cache.clear()
+    def install_kv_hooks(self, cache):
+        hooks = []
+        
+        def layer_hook(module, _, output):
+            if module not in cache:
+                cache[module] = output.detach()
+                
+        def install(layer):
+            if isinstance(layer, MultiHeadCrossAttention):
+                hooks.append(layer.key.register_forward_hook(layer_hook))
+                hooks.append(layer.value.register_forward_hook(layer_hook))
+        self.decoder.apply(install)
+        return cache, hooks

@@ -50,7 +50,7 @@ def transcribe(filepath: str, model_name: str, task: str, language: str, decoder
     n_segments = (mel_spectrogram.shape[1] // 3000) + 1
     with tqdm.tqdm(total=n_segments, ncols=80) as progbar:
         while True:
-            if (mel_spectrogram.shape[1] - current_segment_pos) < 3000:
+            if (mel_spectrogram.shape[1] - current_segment_pos) < 2000:
                 break
             audio_segment = pad_or_trim_spectrogram(mel_spectrogram[:,current_segment_pos:])
             result = decoder.decode_segment(audio_segment)
