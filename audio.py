@@ -15,9 +15,7 @@ SAMPLE_RATE = 16000
 # Given the sampling rate of 16000Hz, this corresponds to 0.025s or 25ms of audio.
 N_FFT = 400
 # Hop length is how many data points to skip after performing dft on a given window size.
-# Hop length of one means after performing a dft we slide the window by one step. Essentially
-# it is the distance between neighboring sliding windows. Hop length greater than or equal to
-# N_FFT would mean no overlap. The less the hop_length the more the overlap.
+# Essentially, it is the distance between neighboring sliding windows.
 HOP_LENGTH = 160
 # Number of mel bin frequency bands.
 N_MELS = 80
@@ -57,7 +55,7 @@ def load_audio_from_video(filepath: str) -> Tensor:
 def mel_filters(device) -> torch.Tensor:
     """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
 
-    The filterbank was computed by Librosa library.
+    The filterbank was computed using Librosa library.
 
     Returns:
         A filterbank tensor of shape (80, 201). 80 is the number of dimensions to project

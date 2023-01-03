@@ -377,7 +377,7 @@ def save_to_srt(segment_transcripts: List[AudioSegmentTranscript], tokenizer: To
                 start_time = format_timestamp(start_ts + segment_offset)
                 end_ts = float(tokenizer.decode_with_timestamps([ts_tokens.pop(-1)]).split('|')[1])
                 # Don't allow a segment final timestamp to be greater than 30.0 secs.
-                end_ts = end_ts if end_ts <= 30.0 else 30.0
+                # end_ts = end_ts if end_ts <= 30.0 else 30.0
                 end_time = format_timestamp(end_ts + segment_offset)
                 timestamp = f'{start_time} --> {end_time}'
                 text = tokenizer.decode(ts_tokens).lstrip()
@@ -385,4 +385,4 @@ def save_to_srt(segment_transcripts: List[AudioSegmentTranscript], tokenizer: To
                 f.write(srt_segment)
                 ts_tokens_ctr += 1
             segment_offset += end_ts
-    print('\nSrt subtitles successfully saved.')
+    print('\nSrt subtitles successfully generated.')
