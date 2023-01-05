@@ -40,9 +40,8 @@ def transcribe(options: TranscriptionOptions):
     elif options.language:
         tokenizer = get_tokenizer(multilingual=True, task=options.task, language=options.language)
     else:
-        print('Performing language detection ...', end='')
         language = detect_language(mel_spectrogram, model)
-        print(f'language detected: {LANGUAGES[language]}')
+        print(f'Detected language: {LANGUAGES[language]}')
         tokenizer = get_tokenizer(multilingual=True, task=options.task, language=language)
 
     # Decoder selection

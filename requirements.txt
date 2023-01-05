@@ -1,5 +1,6 @@
-ffmpeg-python==0.2.0
-numpy==1.21.6
-torch==1.12.1
-transformers==4.24.0
-tqdm==4.64.0
+ffmpeg-python>=0.2.0
+numpy>=1.21.6
+tensorflow>=2.9.2
+torch>=1.12.1
+transformers>=4.24.0
+tqdm>=4.64.0

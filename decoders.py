@@ -273,7 +273,10 @@ class BeamSearchDecoder(Decoder):
             sum_logprobs = new_sum_logprobs
         if final_beams_tokens:
             # Return highest probability sequence of the final `n_beam` sequences.
-            # TODO: Add length normalization or length penalty.
+            # First perform length normalization to avoid always selecting the beam with
+            # the least length.
+            for i in range(len(final_beams_logprobs)):
+                final_beams_logprobs[i] = final_beams_logprobs[i] / len(final_beams_tokens[i])
             top_idx = final_beams_logprobs.index(max(final_beams_logprobs))
             out_tokens = list(final_beams_tokens[top_idx])
         else:
@@ -385,4 +388,4 @@ def save_to_srt(segment_transcripts: List[AudioSegmentTranscript], tokenizer: To
                 f.write(srt_segment)
                 ts_tokens_ctr += 1
             segment_offset += end_ts
-    print('\nSrt subtitles successfully generated.')
+    print('\nSubtitles successfully generated.')
