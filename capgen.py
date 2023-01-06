@@ -1,7 +1,7 @@
 import argparse
 import os
 
-from transcribe import TranscriptionOptions, transcribe, AVAILABLE_MODELS, AVAILABLE_DECODERS, LANGUAGES
+from capgen.transcribe import AVAILABLE_MODELS, AVAILABLE_DECODERS, LANGUAGES, TranscriptionOptions, transcribe
 
 
 def _validate_filepath(filepath):
@@ -33,48 +33,42 @@ def _validate_language_and_model_compat(language, model_name):
 
 def cli():
     parser = argparse.ArgumentParser()
-    parser.add_argument('filepath', help='path to the video supposed to be transcribed')
+    parser.add_argument("filepath", help="path to the video supposed to be transcribed")
     parser.add_argument(
-        '--model',
+        "--model",
         help="type of model to use. Default is medium model.",
-        default='medium',
+        default="medium",
         choices=AVAILABLE_MODELS,
     )
     parser.add_argument(
-        '--task',
+        "--task",
         help="task to perform. 'transcribe' produces captions in the language spoken in video while 'translate' translates to English. Default is transcribe.",
-        default='transcribe',
-        choices=('transcribe', 'translate'),
+        default="transcribe",
+        choices=("transcribe", "translate"),
     )
     parser.add_argument(
-        '--language',
+        "--language",
         help="language spoken in the video. If not provided, it is automatically detected.",
-        default='',
+        default="",
         choices=sorted(LANGUAGES.keys()),
     )
     parser.add_argument(
-        '--decoder',
+        "--decoder",
         help="type of decoder to use to perform transcription. Default is beamsearch which produces better transcriptions.",
-        default='beamsearch',
+        default="beamsearch",
         choices=AVAILABLE_DECODERS,
     )
     parser.add_argument(
-        '--nbeam',
+        "--nbeam",
         help="number of beams to use when using beamsearch decoder. Default is 5.",
         type=int,
         default=5,
     )
     parser.add_argument(
-        '--temperature',
+        "--temperature",
         help="temperature to use when using sampling decoder. Default is 1.",
         type=float,
         default=1.,
-    )
-    parser.add_argument(
-        '--mode',
-        help="The mode to run the model. Default just outputs subtitle file while debug outputs extra info.",
-        choices=('default', 'debug'),
-        default='default',
     )
 
     args = parser.parse_args()
@@ -87,7 +81,6 @@ def cli():
         decoder = args.decoder,
         n_beam = _validate_nbeam(args.nbeam),
         temperature = _validate_temperature(args.temperature),
-        mode = args.mode,
     )
 
     _validate_language_and_model_compat(args.language, args.model)

@@ -240,7 +240,7 @@ class AudioEncoder(nn.Module):
         self.conv1 = Conv1d(n_mels, n_audio_state, kernel_size=3, stride=1, padding=1)
         self.conv2 = Conv1d(n_audio_state, n_audio_state, kernel_size=3, stride=2, padding=1)
         self.gelu = GELU()
-        self.register_buffer('positional_embedding', self._get_pos_encoding(n_audio_ctx, n_audio_state))
+        self.register_buffer("positional_embedding", self._get_pos_encoding(n_audio_ctx, n_audio_state))
 
         n_audio_mlp = n_audio_state * 4
         self.blocks = nn.ModuleList(
@@ -300,9 +300,9 @@ class TextDecoder(nn.Module):
         )
         self.ln = LayerNorm(n_text_state)
 
-        mask = torch.full((n_text_ctx, n_text_ctx), float('-Infinity')).triu_(diagonal=1)
+        mask = torch.full((n_text_ctx, n_text_ctx), float("-Infinity")).triu_(diagonal=1)
         # persistent argument ensures the mask is not included in the state dict of the module.
-        self.register_buffer('mask', mask, persistent=False)
+        self.register_buffer("mask", mask, persistent=False)
 
     def forward(self, x: Tensor, xa: Tensor, cache: Optional[dict] = None) -> Tensor:
         """Computes logits of the next token given text context and audio features.

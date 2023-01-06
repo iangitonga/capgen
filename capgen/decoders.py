@@ -11,12 +11,12 @@ import torch.nn.functional as F
 import numpy as np
 from torch import Tensor
 
-from audio import pad_or_trim_spectrogram, N_FRAMES, N_FRAMES_PER_SECOND
-from model import Whisper
-from tokenizer import get_tokenizer, Tokenizer
+from .audio import pad_or_trim_spectrogram, N_FRAMES, N_FRAMES_PER_SECOND
+from .model import Whisper
+from .tokenizer import get_tokenizer, Tokenizer
 
 # CONSTANTS
-AVAILABLE_DECODERS = ('greedy', 'beamsearch', 'sampling')
+AVAILABLE_DECODERS = ("greedy", "beamsearch", "sampling")
 MAX_SAMPLE_LEN = 448 // 2  # Maximum length of tokens in a 30s audio segment. Equal to n_ctx//2
 
 
@@ -46,8 +46,8 @@ class ModelInference:
 
 @dataclass
 class AudioSegmentTranscript:
-    tokens: List[int]
-    segmented_tokens: List[List[int]]
+    tokens: Tuple[int]
+    segmented_tokens: Tuple[Tuple[int]]
     compression_ratio: float
     final_timestamp: float
 
@@ -158,15 +158,15 @@ class Decoder(abc.ABC):
         for token in tokens:
             if token >= self.tokenizer.timestamp_begin and len(current_tokens) != 0:
                 current_tokens.append(token)
-                segment_tokens.append(current_tokens)
+                segment_tokens.append(tuple(current_tokens))
                 current_tokens = []
             else:
                 current_tokens.append(token)
-        return segment_tokens
+        return tuple(segment_tokens)
 
     def create_transcript(self, tokens: List[int]) -> AudioSegmentTranscript:
         transcript = AudioSegmentTranscript(
-            tokens=tokens,
+            tokens=tuple(tokens),
             segmented_tokens=self.segment_tokens(tokens),
             compression_ratio=self.text_compression_ratio(self.tokenizer.decode(tokens).encode('utf-8')),
             final_timestamp=self.get_final_timestamp(tokens),
@@ -345,47 +345,3 @@ def detect_language(spectrogram: Tensor, model: Whisper) -> str:
     language_token = language_token_probs.argmax(dim=-1)
     language_id = tokenizer.decode(language_token).split('|')[1]
     return language_id
-
-
-def format_timestamp(timestamp: float) -> str:
-    milliseconds = round(timestamp * 1000.0)
-    hours = milliseconds // 3_600_000
-    milliseconds -= hours * 3_600_000
-    minutes = milliseconds // 60_000
-    milliseconds -= minutes * 60_000
-    seconds = milliseconds // 1_000
-    milliseconds -= seconds * 1_000
-
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
-
-
-def save_to_srt(segment_transcripts: List[AudioSegmentTranscript], tokenizer: Tokenizer, fname: str) -> None:
-    """Decodes the given audio transcription tokens and saves them in srt format.
-    
-    Args:
-        batch_tokens: A list of lists where each inner list at pos i contains transcription tokens of 30-second
-         audio segment at pos i in original audio. The inner lists also contains inner lists which contains
-         timestamped segments of text. [ [ [<0.00>, text..., <5.00>]... ]... ] when tokens are decoded.
-        tokenizer: A tokenizer to decode the tokens.
-        fname: The name of the file to save the tokens.
-    """
-    with open(fname, 'w') as f:
-        ts_tokens_ctr = 1
-        segment_offset = 0
-        for i in range(len(segment_transcripts)):
-            segment_transcript = segment_transcripts[i]
-            for ts_tokens in segment_transcript.segmented_tokens:
-                index = str(ts_tokens_ctr)
-                start_ts = float(tokenizer.decode_with_timestamps([ts_tokens.pop(0)]).split('|')[1])
-                start_time = format_timestamp(start_ts + segment_offset)
-                end_ts = float(tokenizer.decode_with_timestamps([ts_tokens.pop(-1)]).split('|')[1])
-                # Don't allow a segment final timestamp to be greater than 30.0 secs.
-                # end_ts = end_ts if end_ts <= 30.0 else 30.0
-                end_time = format_timestamp(end_ts + segment_offset)
-                timestamp = f'{start_time} --> {end_time}'
-                text = tokenizer.decode(ts_tokens).lstrip()
-                srt_segment = f'{index}\n{timestamp}\n{text}\n\n'
-                f.write(srt_segment)
-                ts_tokens_ctr += 1
-            segment_offset += end_ts
-    print('\nSubtitles successfully generated.')

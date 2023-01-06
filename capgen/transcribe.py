@@ -3,17 +3,19 @@ from dataclasses import dataclass
 
 import tqdm
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow messages.
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TensorFlow messages.
 
-from audio import load_audio_from_video, get_audio_mel_spectrogram, pad_or_trim_spectrogram
-from decoders import detect_language, save_to_srt, GreedyDecoder, BeamSearchDecoder, SamplingDecoder, AVAILABLE_DECODERS
-from loader import load_model, AVAILABLE_MODELS
-from tokenizer import get_tokenizer, LANGUAGES
+from .audio import load_audio_from_video, get_audio_mel_spectrogram, pad_or_trim_spectrogram
+from .decoders import detect_language, GreedyDecoder, BeamSearchDecoder, SamplingDecoder, AVAILABLE_DECODERS
+from .loader import load_model, AVAILABLE_MODELS
+from .tokenizer import get_tokenizer, LANGUAGES
+from .utils import save_to_srt, save_to_vtt, save_to_txt
 
 
 # Maximum compression ratio a segment transcription text should have. Greater
 # compression ratio than this means the text is too repetitive.
 COMPRESSION_RATIO_THRESHOLD = 2.4
+# TODO: Add logprob and no-speech threshold.
 
 
 @dataclass
@@ -25,7 +27,13 @@ class TranscriptionOptions:
 	decoder: str = None
 	n_beam: str = None
 	temperature: float = None
-	mode: str = None
+
+
+def _get_output_filename(video_filepath, extension):
+    abspath = os.path.abspath(video_filepath)
+    basepath, filename = os.path.split(abspath)
+    filename = filename.split('.')[0] + '.' + extension
+    return os.path.join(basepath, filename)
 
 
 def transcribe(options: TranscriptionOptions):
@@ -35,13 +43,13 @@ def transcribe(options: TranscriptionOptions):
     mel_spectrogram = get_audio_mel_spectrogram(audio)
 
     # Tokenizer loading and language detection.
-    if options.model_name.endswith('en'):
-        tokenizer = get_tokenizer(multilingual=False, task='transcribe', language='en')
+    if options.model_name.endswith("en"):
+        tokenizer = get_tokenizer(multilingual=False, task="transcribe", language="en")
     elif options.language:
         tokenizer = get_tokenizer(multilingual=True, task=options.task, language=options.language)
     else:
         language = detect_language(mel_spectrogram, model)
-        print(f'Detected language: {LANGUAGES[language]}')
+        print(f"Detected language: {LANGUAGES[language]}")
         tokenizer = get_tokenizer(multilingual=True, task=options.task, language=language)
 
     # Decoder selection
@@ -75,13 +83,11 @@ def transcribe(options: TranscriptionOptions):
 
             progbar.update(1)
 
-    abspath = os.path.abspath(options.video_filepath)
-    basepath, filename = os.path.split(abspath)
-    srt_filename = filename.split('.')[0] + '.srt'
-    srt_filepath = os.path.join(basepath, srt_filename)
-    save_to_srt(audio_transcript, tokenizer, srt_filepath)
-    if options.mode == 'debug':
-        fname = filename.split('.')[0] + '.txt'
-        with open(fname, 'w') as f:
-            for seg_transcript in audio_transcript:
-                f.write(tokenizer.decode_with_timestamps(seg_transcript.tokens) + '\n\n')
+    # Save the transcripts.
+    srt_fname = _get_output_filename(options.video_filepath, 'srt')
+    save_to_srt(audio_transcript, tokenizer, srt_fname)
+    vtt_fname = _get_output_filename(options.video_filepath, 'vtt')
+    save_to_vtt(audio_transcript, tokenizer, vtt_fname)
+    txt_fname = _get_output_filename(options.video_filepath, 'txt')
+    save_to_txt(audio_transcript, tokenizer, txt_fname)
+    print('\nCaptions successfully generated.')

@@ -10,7 +10,7 @@ from typing import List, Optional, Union
 import torch
 from tqdm import tqdm
 
-from model import Whisper, ModelDimensions
+from .model import Whisper, ModelDimensions
 
 
 _MODELS = {
